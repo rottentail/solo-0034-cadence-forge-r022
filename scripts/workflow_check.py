@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production workflow verification; baseline automated testing is deferred."""
 import argparse
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -147,14 +148,41 @@ def main():
             verification = request('POST', '/renders/'+rid+'/verify')
             artifact = request('GET', '/renders/'+rid+'/artifact', raw=True)
             need(hashlib.sha256(artifact).hexdigest() == verification['digest'], 'artifact digest mismatch')
-            observe('artifact-verify', 'download SHA-256 equals committed inspection')
+            captions_dl = request('GET', '/renders/'+rid+'/artifact?captions=1', raw=True)
+            need(captions_dl.decode() == done['plan']['vtt'], 'served captions differ from frozen plan')
+            render_dir = scratch/'data'/'renders'/(rid+'-1')
+            media_path = render_dir/'composition.mp4'
+            original_media = media_path.read_bytes()
+            replaced = bytearray(original_media)
+            replaced[len(replaced)//2] ^= 0xFF
+            media_path.write_bytes(replaced)
+            request('GET', '/renders/'+rid+'/artifact', status=500)
+            request('POST', '/renders/'+rid+'/verify', status=500)
+            request('GET', '/renders/'+rid+'/bundle', status=500)
+            media_path.write_bytes(original_media)
+            restored = request('GET', '/renders/'+rid+'/artifact', raw=True)
+            need(hashlib.sha256(restored).hexdigest() == verification['digest'], 'restored artifact digest mismatch')
+            captions_path = render_dir/'captions.vtt'
+            original_captions = captions_path.read_bytes()
+            forged = original_captions.replace(b'00:00:01.000', b'00:00:09.000', 1)
+            need(len(forged) == len(original_captions) and forged != original_captions, 'caption replacement setup failed')
+            captions_path.write_bytes(forged)
+            request('GET', '/renders/'+rid+'/artifact?captions=1', status=500)
+            request('POST', '/renders/'+rid+'/verify', status=500)
+            captions_path.write_bytes(original_captions)
+            need(request('GET', '/renders/'+rid+'/artifact?captions=1', raw=True) == original_captions, 'restored captions mismatch')
+            observe('artifact-verify', 'download SHA-256 equals committed inspection; same-length external replacement of media or captions refused until original bytes restored; served captions equal frozen plan')
             if args.workflow in ('all', 'bundle'):
                 packed = request('GET', '/renders/'+rid+'/bundle', raw=True)
                 with zipfile.ZipFile(io.BytesIO(packed)) as z:
                     need(set(z.namelist()) == {'composition.mp4', 'captions.vtt', 'composition.json'}, 'bundle members mismatch')
                     frozen = json.loads(z.read('composition.json'))
                     need(frozen['plan']['vtt'] == z.read('captions.vtt').decode(), 'bundle captions drifted')
-                observe('bundle', 'verified media, captions and frozen manifest exported together')
+                    need(hashlib.sha256(z.read('composition.mp4')).hexdigest() == verification['digest'], 'bundle media digest mismatch')
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    packed_many = list(pool.map(lambda _: request('GET', '/renders/'+rid+'/bundle', raw=True), range(4)))
+                need(all(p == packed for p in packed_many), 'concurrent bundles diverged')
+                observe('bundle', 'verified media, captions and frozen manifest exported together; four concurrent bundles byte-identical')
             if args.workflow in ('all', 'wav-render'):
                 ar = request('POST', '/recipes', dict(recipe_body, name='reference-audio', format='wav', normalize=True), status=201)
                 audio_render = request('POST', '/renders', dict(req, recipe_id=ar['id']), {'Idempotency-Key': 'audio'}, status=202)
@@ -182,7 +210,9 @@ def main():
                 request('POST', '/renders/'+interrupted_id+'/retry', status=202)
                 retried = wait_render(interrupted_id)
                 need(retried['state'] == 'succeeded' and len(retried['attempts']) == 2, str(retried['attempts']))
-                observe('retry', 'second attempt completed using original snapshot')
+                retried_dl = request('GET', '/renders/'+interrupted_id+'/artifact', raw=True)
+                need(hashlib.sha256(retried_dl).hexdigest() == retried['artifact']['inspection']['digest'], 'download not bound to the successful attempt')
+                observe('retry', 'second attempt completed using original snapshot; download bound to the successful attempt')
             events = request('GET', '/events?after=0')
             need(events and all(a['sequence'] < b['sequence'] for a, b in zip(events, events[1:])), 'event order mismatch')
             tail = request('GET', '/events?after='+str(events[-1]['sequence']))

@@ -123,7 +123,7 @@ func (s *Service) execute(ctx context.Context, r domain.Render) {
 		s.complete(r, nil, err)
 		return
 	}
-	inspection, err := inspect.Artifact(ctx, s.Probe, filepath.Join(stage, name), r)
+	inspection, err := inspect.Artifact(ctx, s.Probe, filepath.Join(stage, name), contractOf(r))
 	if err != nil {
 		s.complete(r, nil, err)
 		return

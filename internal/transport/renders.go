@@ -1,11 +1,11 @@
 package transport
 
 import (
+	"bytes"
 	"cadenceforge/internal/domain"
 	"cadenceforge/internal/service"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 func (a API) submit(w http.ResponseWriter, r *http.Request) {
@@ -59,23 +59,22 @@ func (a API) verify(w http.ResponseWriter, r *http.Request) {
 	write(w, 200, v)
 }
 func (a API) artifact(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, err := a.Service.Verify(r.Context(), id); err != nil {
-		failure(w, err)
-		return
-	}
-	render, dir, err := a.Service.Artifact(id)
+	d, err := a.Service.Deliver(r.Context(), r.PathValue("id"))
 	if err != nil {
 		failure(w, err)
 		return
 	}
-	name := render.Artifact.Filename
+	defer d.Close()
+	name := d.Render.Artifact.Filename
 	if r.URL.Query().Get("captions") == "1" {
-		name = render.Artifact.CaptionFile
+		name = d.Render.Artifact.CaptionFile
 		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		http.ServeContent(w, r, name, d.CaptionMod, bytes.NewReader(d.Captions))
+		return
 	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
-	http.ServeFile(w, r, filepath.Join(dir, name))
+	http.ServeContent(w, r, name, d.MediaMod, d.Media)
 }
 func (a API) bundle(w http.ResponseWriter, r *http.Request) {
 	f, err := os.CreateTemp("", "cadence-bundle-*.zip")
